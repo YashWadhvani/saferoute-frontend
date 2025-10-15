@@ -1,0 +1,84 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# === Default & Recommended for Flutter ===
+#
+# Compiled application files
+/build/
+
+# IDE files (e.g., VS Code, IntelliJ/Android Studio)
+.idea/
+.vscode/
+
+# Project configuration files (often auto-generated)
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.dart_tool/
+
+# iOS-specific files
+/ios/Flutter/Generated.xcconfig
+/ios/Flutter/App.framework
+/ios/Flutter/app.framework
+
+# Android-specific files
+/android/.gradle
+/android/local.properties
+/android/key.properties
+/android/captures
+/android/build/
+/android/app/build/
+/android/gradle/wrapper/gradle-wrapper.jar
+/android/app/.cxx/
+/android/app/.externalNativeBuild/
+
+# Native dependency caches
+/windows/flutter/ephemeral/
+/linux/flutter/ephemeral/
+/macos/Flutter/ephemeral/
+
+# Pub package manager files
+/pubspec.lock
