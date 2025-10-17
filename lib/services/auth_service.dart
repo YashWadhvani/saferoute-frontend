@@ -4,7 +4,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class AuthService {
   final Dio _dio = Dio();
-  final String baseUrl = dotenv.env['API_BASE_URL'] ?? "http://10.0.2.2:5000"; // change if deployed or on LAN
+  final String baseUrl = dotenv.env['API_BASE_URL'] ?? "https://saferoute-backend-nw9n.onrender.com/"; // change if deployed or on LAN
 
   Future<void> sendOtp(String identifier) async {
     try {

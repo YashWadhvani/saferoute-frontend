@@ -39,11 +39,10 @@ android {
         }
     }
 
-    dexOptions {
-        // Enable multidexing to support more than 64K methods.
-        // See https://developer.android.com/studio/build/multidex.
-        javaMaxHeapSize = "4g"
-    }
+    // Note: 'dexOptions' is deprecated and removed in newer AGP versions.
+    // Gradle now optimizes dexing automatically. If you need to increase
+    // heap for the Gradle daemon, consider configuring the Gradle JVM
+    // via org.gradle.jvmargs in gradle.properties instead.
 }
 
 flutter {

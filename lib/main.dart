@@ -5,7 +5,6 @@ import 'providers/auth_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
 import 'screens/signup_screen.dart';
-import 'screens/otp_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/onboarding_screen.dart';
@@ -38,7 +37,6 @@ class SafeRouteApp extends StatelessWidget {
         '/': (context) => const HomeScreen(),
         '/splash': (context) => const SplashScreen(),
         '/signup': (context) => const SignupScreen(),
-        '/otp': (context) => const OtpScreen(),
         '/profile': (context) => const ProfileScreen(),
         '/settings': (context) => const SettingsScreen(),
         '/onboarding': (context) => const OnboardingScreen(),
