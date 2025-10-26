@@ -1,0 +1,6 @@
+Selected Route is not highlighted correctly
+and reduce the car size to 1/10th of what it is rn
+and also where is the tts settings screen?
+
+and on home screen no need to add a marker for users current location
+maps sdk already puts one marker to indicate it

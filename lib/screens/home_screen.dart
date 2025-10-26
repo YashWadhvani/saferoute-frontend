@@ -1,16 +1,21 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:ui' as ui;
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import '../utils/map_helpers.dart';
+import '../models/route_model.dart';
+import '../state/tts_settings.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:google_place/google_place.dart';
-import 'dart:math' as math;
 import 'package:flutter_tts/flutter_tts.dart';
-import '../services/route_service.dart';
+import 'package:provider/provider.dart';
 import '../services/places_service.dart';
-import 'route_suggestion_screen.dart';
+import '../services/route_service.dart';
+import '../services/navigation_service.dart';
 
-// Which field is currently requesting suggestions (source or destination)
 enum ActiveField { none, source, dest }
 
 class HomeScreen extends StatefulWidget {
@@ -20,260 +25,191 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  GoogleMapController? _controller;
-  static const LatLng _center = LatLng(23.0225, 72.5714); // Ahmedabad
-  final TextEditingController _sourceController = TextEditingController();
-  final TextEditingController _destController = TextEditingController();
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final PlacesService _placesService = PlacesService.fromEnv();
-  bool _showCompare = false;
-  bool _gettingLocation = false;
-  // which field is currently requesting suggestions
-  ActiveField _activeField = ActiveField.none;
-  List suggestions = [];
-  Timer? _debounceTimer;
-  bool _loadingSuggestions = false;
-  double? _sourceLat;
-  double? _sourceLng;
-  double? _destLat;
-  double? _destLng;
-  final Set<Marker> _markers = {};
-  final Set<Polyline> _polylines = {};
-
-  // Compare Routes / Navigation state
-  List<RouteModel> _routes = [];
-  int? _selectedRouteIndex;
-  bool _routePanelVisible = false;
-  bool _navigating = false;
-  StreamSubscription<Position>? _posSub;
-  String _navInstruction = 'Press Start to begin navigation';
-  FlutterTts? _tts;
-
-  double? _userLat;
-  double? _userLng;
 
   @override
   void initState() {
     super.initState();
-    _fetchUserLocation();
     _tts = FlutterTts();
     _tts?.setLanguage('en-US');
-    _tts?.setSpeechRate(0.45);
+    // create navigation service (will use same TTS instance)
+    _navigationService = NavigationService(tts: _tts);
+    _loadCarIcon();
+    WidgetsBinding.instance.addObserver(this);
+    // try to restore navigation state if app was backgrounded
+    _restoreNavigationIfAny();
+    _fetchUserLocation();
   }
 
-  Future<void> _fetchUserLocation() async {
+  BitmapDescriptor? _carIcon;
+  LatLng? _prevNavLocation;
+
+  Future<void> _loadCarIcon() async {
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-        final locationSettings = const LocationSettings(accuracy: LocationAccuracy.high);
-        final pos = await Geolocator.getCurrentPosition(locationSettings: locationSettings);
-        if (mounted) {
-          _userLat = pos.latitude;
-          _userLng = pos.longitude;
-          _updateMarkers();
-          if (_controller != null) {
-            try {
-              await _controller!.animateCamera(CameraUpdate.newLatLng(LatLng(_userLat!, _userLng!)));
-            } catch (_) {}
-          }
-        }
-      }
+      // load raw image bytes from assets
+      final data = await DefaultAssetBundle.of(context).load('assets/images/car.png');
+      final bytes = data.buffer.asUint8List();
+  // Resize the image to a smaller logical width so marker appears smaller on the map.
+  // Choose [desiredLogicalWidth] in logical pixels (device-independent).
+  // The codec expects device pixels, so multiply by devicePixelRatio.
+  const double desiredLogicalWidth = 48; // change this to taste (logical pixels)
+  final double dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? ui.window.devicePixelRatio;
+  final int targetWidth = (desiredLogicalWidth * dpr).round();
+  final codec = await ui.instantiateImageCodec(bytes, targetWidth: targetWidth);
+      final frame = await codec.getNextFrame();
+      final ui.Image resized = frame.image;
+      final byteData = await resized.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
+      final resizedBytes = byteData.buffer.asUint8List();
+      final icon = BitmapDescriptor.fromBytes(resizedBytes);
+      if (!mounted) return;
+      setState(() => _carIcon = icon);
     } catch (_) {
       // ignore
     }
   }
 
-  // --- Route & Navigation helpers (copied/adapted from RouteSuggestionScreen/NavigationScreen)
-
-  List<LatLng> _decodePolyline(String encoded) {
-    final List<LatLng> points = [];
-    int index = 0;
-    int len = encoded.length;
-    int lat = 0;
-    int lng = 0;
-
-    while (index < len) {
-      int b;
-      int shift = 0;
-      int result = 0;
-      do {
-        b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-      int dlat = ((result & 1) != 0) ? ~(result >> 1) : (result >> 1);
-      lat += dlat;
-
-      shift = 0;
-      result = 0;
-      do {
-        b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-      int dlng = ((result & 1) != 0) ? ~(result >> 1) : (result >> 1);
-      lng += dlng;
-
-      points.add(LatLng(lat / 1e5, lng / 1e5));
-    }
-    return points;
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _navUpdateSub?.cancel();
+    _navigationService?.dispose();
+    _tts?.stop();
+    super.dispose();
   }
 
-  Color? _parseColorString(String? input) {
-    if (input == null || input.trim().isEmpty) return null;
-    final s = input.trim();
+  double? _userLat;
+  double? _userLng;
+  void _fetchUserLocation() async {
     try {
-      if (s.startsWith('#')) {
-        final hex = s.substring(1);
-        if (hex.length == 6) {
-          final v = int.parse('FF$hex', radix: 16);
-          return Color(v);
-        } else if (hex.length == 8) {
-          final v = int.parse(hex, radix: 16);
-          return Color(v);
-        }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
       }
-      if (s.startsWith('0x')) {
-        final v = int.parse(s);
-        return Color(v);
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        return;
       }
-      final c = s.toLowerCase();
-      if (c.contains('green')) return Colors.green;
-      if (c.contains('yellow')) return Colors.yellow;
-      if (c.contains('orange')) return Colors.orange;
-      if (c.contains('red')) return Colors.red;
-      if (c.contains('blue')) return Colors.blue;
-      return Colors.blueGrey;
-    } catch (_) {
-      return null;
-    }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+      setState(() {
+        _userLat = pos.latitude;
+        _userLng = pos.longitude;
+      });
+      // Center map on user location if map is ready
+      if (_controller != null && _userLat != null && _userLng != null) {
+        _controller!.animateCamera(
+          CameraUpdate.newLatLng(LatLng(_userLat!, _userLng!)),
+        );
+      }
+    } catch (_) {}
   }
 
-  void _buildPolylinesFromRoutes() {
-    final polylines = <Polyline>{};
-    for (var i = 0; i < _routes.length; i++) {
-      final r = _routes[i];
-      final id = PolylineId('route_$i');
-      final isSelected = _selectedRouteIndex != null && _selectedRouteIndex == i;
-
-      // parse color from backend if present
-      Color? parsed = _parseColorString(r.color);
-
-      double score = r.safetyScore;
-      if (score <= 1.0) score = score * 5.0;
-
-      Color baseColor;
-      if (parsed != null) {
-        baseColor = parsed;
-      } else if (score >= 4.0) {
-        baseColor = Colors.green;
-      } else if (score >= 2.5) {
-        baseColor = Colors.orange;
-      } else {
-        baseColor = Colors.red;
-      }
-
-  final int rCh = ((baseColor.r * 255.0).round() & 0xFF);
-  final int gCh = ((baseColor.g * 255.0).round() & 0xFF);
-  final int bCh = ((baseColor.b * 255.0).round() & 0xFF);
-    final polyColor = isSelected
-      ? Color.fromARGB((0.95 * 255).round(), rCh, gCh, bCh)
-      : Color.fromARGB((0.45 * 255).round(), rCh, gCh, bCh);
-
-      polylines.add(Polyline(polylineId: id, points: r.points, color: polyColor, width: isSelected ? 8 : 5, consumeTapEvents: true, onTap: () => _onSelectRoute(i), zIndex: isSelected ? 2 : 1));
+  void _updateMarkers() {
+    final markers = <Marker>{};
+    // do not add origin marker - Google Maps will show current location
+    if (_destLat != null && _destLng != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('destination'),
+          position: LatLng(_destLat!, _destLng!),
+          infoWindow: InfoWindow(
+            title: 'Destination',
+            snippet: _destController.text,
+          ),
+        ),
+      );
     }
-    setState(() => _polylines
-      ..clear()
-      ..addAll(polylines));
+    // add moving car marker if navigating and we have an update
+    if (_navigating && _lastNavUpdate != null) {
+      final pos = _lastNavUpdate!.userLocation;
+      double rotation = 0.0;
+      if (_prevNavLocation != null) {
+        rotation = bearing(_prevNavLocation!, pos);
+      }
+      markers.add(Marker(
+        markerId: const MarkerId('car'),
+        position: pos,
+        icon: _carIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+        rotation: rotation,
+        anchor: const Offset(0.5, 0.5),
+        infoWindow: InfoWindow(title: 'You', snippet: _lastNavUpdate!.instruction),
+      ));
+    }
+    setState(() {
+      _markers = markers;
+    });
+  }
+
+  void _onMapCreated(GoogleMapController controller) {
+    _controller = controller;
   }
 
   void _onSelectRoute(int index) {
     setState(() {
       _selectedRouteIndex = index;
+      _routePanelVisible = true;
     });
+    // Rebuild polylines so the selected route is visually updated
     _buildPolylinesFromRoutes();
-    _fitMapToRoute(index);
-  }
-
-  void _fitMapToRoute(int index) async {
-    if (_controller == null) return;
-    if (_routes.isEmpty) return;
-    final pts = _routes[index].points;
-    if (pts.isEmpty) return;
-    double south = pts.first.latitude;
-    double north = pts.first.latitude;
-    double west = pts.first.longitude;
-    double east = pts.first.longitude;
-    for (final p in pts) {
-      south = math.min(south, p.latitude);
-      north = math.max(north, p.latitude);
-      west = math.min(west, p.longitude);
-      east = math.max(east, p.longitude);
+    // Optionally fit map to the selected route
+    if (_controller != null && _routes.length > index && _routes[index].points.isNotEmpty) {
+      final bounds = _boundsFromPoints(_routes[index].points);
+      _controller!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 48));
     }
-    final bounds = LatLngBounds(southwest: LatLng(south, west), northeast: LatLng(north, east));
-    try {
-      await _controller!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 48));
-    } catch (_) {}
   }
 
   Future<void> _fetchRoutesInPlace() async {
-    setState(() {
-      _routes = [];
-      _selectedRouteIndex = null;
-      _routePanelVisible = false;
-    });
-
     final source = _sourceController.text.trim();
     final dest = _destController.text.trim();
-
-    // Ensure we have coords for dest and source if possible (geocode as fallback)
-    if ((_destLat == null || _destLng == null) && dest.isNotEmpty) {
-      try {
-        final locations = await geocoding.locationFromAddress(dest);
-        if (locations.isNotEmpty) {
-          final loc = locations.first;
-          _destLat = loc.latitude;
-          _destLng = loc.longitude;
-        }
-      } catch (_) {}
-    }
-    if ((_sourceLat == null || _sourceLng == null) && source.isNotEmpty) {
+    setState(() => _routePanelVisible = true);
+    // Geocode if needed
+    double? srcLat = _sourceLat,
+        srcLng = _sourceLng,
+        dstLat = _destLat,
+        dstLng = _destLng;
+    if ((srcLat == null || srcLng == null) && source.isNotEmpty) {
       try {
         final locations = await geocoding.locationFromAddress(source);
         if (locations.isNotEmpty) {
-          final loc = locations.first;
-          _sourceLat = loc.latitude;
-          _sourceLng = loc.longitude;
+          srcLat = locations.first.latitude;
+          srcLng = locations.first.longitude;
         }
       } catch (_) {}
     }
-
-    if (_destLat == null || _destLng == null) {
+    if ((dstLat == null || dstLng == null) && dest.isNotEmpty) {
+      try {
+        final locations = await geocoding.locationFromAddress(dest);
+        if (locations.isNotEmpty) {
+          dstLat = locations.first.latitude;
+          dstLng = locations.first.longitude;
+        }
+      } catch (_) {}
+    }
+    if (dstLat == null || dstLng == null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a destination with coordinates')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid destination.')),
+      );
       return;
     }
-
-    String to6(double v) => v.toStringAsFixed(6);
-    String makeLatLngString(double? lat, double? lng, String fallback) {
-      if (lat != null && lng != null) return '${to6(lat)},${to6(lng)}';
-      return fallback;
-    }
-
-    final originValue = makeLatLngString(_sourceLat, _sourceLng, source.isNotEmpty ? source : 'origin');
-    final destinationValue = makeLatLngString(_destLat, _destLng, dest);
-
-    final data = {'origin': originValue, 'destination': destinationValue};
-
+    // Build payload for backend
+    final data = {
+      'origin': srcLat != null && srcLng != null
+          ? '${srcLat.toStringAsFixed(6)},${srcLng.toStringAsFixed(6)}'
+          : source,
+      'destination':
+          '${dstLat.toStringAsFixed(6)},${dstLng.toStringAsFixed(6)}',
+    };
+    setState(() => _loadingSuggestions = true);
     try {
       final body = await RouteService.compareRoutes(data);
-      if (body == null) throw Exception('Empty response');
       final routesRaw = body['routes'] as List?;
-      if (routesRaw == null) throw Exception('Invalid response: missing routes');
-
+      if (routesRaw == null) throw Exception('No routes found');
       final parsed = <RouteModel>[];
       double parseDouble(dynamic v) {
         if (v == null) return 0.0;
@@ -286,190 +222,314 @@ class _HomeScreenState extends State<HomeScreen> {
         final id = r['id']?.toString() ?? UniqueKey().toString();
         final safetyVal = r['safetyScore'] ?? r['safety_score'] ?? r['safety'];
         final double score = parseDouble(safetyVal);
-        final String? colorStr = r['color'] is String ? (r['color'] as String) : null;
+        final String? colorStr = r['color'] is String
+            ? (r['color'] as String)
+            : null;
         List<String> tags = [];
         if (r['tags'] is List) {
-          tags = (r['tags'] as List).map((e) => e?.toString() ?? '').where((s) => s.isNotEmpty).toList();
+          tags = (r['tags'] as List)
+              .map((e) => e?.toString() ?? '')
+              .where((s) => s.isNotEmpty)
+              .toList();
         }
-
         String distanceText = '';
-        if (r['distance'] is Map && r['distance']['text'] != null) distanceText = r['distance']['text'].toString();
+        if (r['distance'] is Map && r['distance']['text'] != null)
+          {distanceText = r['distance']['text'].toString();}
         String durationText = '';
-        if (r['duration'] is Map && r['duration']['text'] != null) durationText = r['duration']['text'].toString();
-
+        if (r['duration'] is Map && r['duration']['text'] != null)
+          {durationText = r['duration']['text'].toString();}
         List<LatLng> points = [];
         if (r['polyline'] is String) {
-          points = _decodePolyline(r['polyline'] as String);
+          points = decodePolyline(r['polyline'] as String);
         } else if (r['points'] is List) {
-          points = (r['points'] as List).map<LatLng>((p) => LatLng((p['lat'] as num).toDouble(), (p['lng'] as num).toDouble())).toList();
+          points = (r['points'] as List)
+              .map<LatLng>(
+                (p) => LatLng(
+                  (p['lat'] as num).toDouble(),
+                  (p['lng'] as num).toDouble(),
+                ),
+              )
+              .toList();
         }
-
-        parsed.add(RouteModel(id: id, points: points, safetyScore: score, color: colorStr, tags: tags, distanceText: distanceText, durationText: durationText));
+        parsed.add(
+          RouteModel(
+            id: id,
+            points: points,
+            safetyScore: score,
+            color: colorStr,
+            tags: tags,
+            distanceText: distanceText,
+            durationText: durationText,
+          ),
+        );
       }
-
-      if (!mounted) return;
       setState(() {
         _routes = parsed;
-        // auto-select safest route
-        if (_routes.isNotEmpty) {
-          int bestIdx = 0;
-          double bestScore = _routes[0].safetyScore;
-          for (int i = 1; i < _routes.length; i++) {
-            if (_routes[i].safetyScore > bestScore) {
-              bestScore = _routes[i].safetyScore;
-              bestIdx = i;
-            }
-          }
-          _selectedRouteIndex = bestIdx;
-        } else {
-          _selectedRouteIndex = null;
+        _selectedRouteIndex = parsed.isNotEmpty ? 0 : null;
+        _loadingSuggestions = false;
+        // Optionally, fit map to first route
+        if (_controller != null &&
+            parsed.isNotEmpty &&
+            parsed[0].points.isNotEmpty) {
+          final bounds = _boundsFromPoints(parsed[0].points);
+          _controller!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 48));
         }
-        _routePanelVisible = true;
         _buildPolylinesFromRoutes();
-        _updateMarkers();
       });
-
-      if (_selectedRouteIndex != null) _fitMapToRoute(_selectedRouteIndex!);
     } catch (e) {
+      setState(() => _loadingSuggestions = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error fetching routes: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error fetching routes: $e')));
     }
   }
 
-  void _startInPlaceNavigation(int routeIndex) async {
-    if (routeIndex < 0 || routeIndex >= _routes.length) return;
-    _selectedRouteIndex = routeIndex;
-    _buildPolylinesFromRoutes();
-    _fitMapToRoute(routeIndex);
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+  void _buildPolylinesFromRoutes() {
+    final polylines = <Polyline>{};
+    for (var i = 0; i < _routes.length; i++) {
+      final r = _routes[i];
+      final id = PolylineId('route_$i');
+      final isSelected =
+          _selectedRouteIndex != null && _selectedRouteIndex == i;
+      Color? parsed = parseColorString(r.color);
+      Color baseColor;
+      if (parsed != null) {
+        baseColor = parsed;
+      } else if (r.safetyScore >= 4.0) {
+        baseColor = Colors.green;
+      } else if (r.safetyScore >= 2.5) {
+        baseColor = Colors.orange;
+      } else {
+        baseColor = Colors.red;
+      }
+      // Use Color.withOpacity for clarity and correctness
+  final polyColor = baseColor.withAlpha(((isSelected ? 0.95 : 0.45) * 255).round());
+      // If selected and navigating, draw only the remaining part from nearestIndex
+      if (isSelected && _navigating && _lastNavUpdate != null && _lastNavUpdate!.nearestIndex >= 0) {
+        final startIdx = _lastNavUpdate!.nearestIndex;
+        final remainingPoints = (startIdx < r.points.length) ? r.points.sublist(startIdx) : r.points;
+        // shadow
+        polylines.add(
+          Polyline(
+            polylineId: PolylineId('route_${i}_shadow'),
+            points: remainingPoints,
+            color: Colors.black.withAlpha((0.18 * 255).round()),
+            width: 14,
+            consumeTapEvents: false,
+            zIndex: 2,
+          ),
+        );
+        polylines.add(
+          Polyline(
+            polylineId: id,
+            points: remainingPoints,
+            color: polyColor,
+            width: 10,
+            consumeTapEvents: true,
+            onTap: () => _onSelectRoute(i),
+            zIndex: 3,
+          ),
+        );
+        // also draw faded past route for context (optional)
+        if (startIdx > 1) {
+          final past = r.points.sublist(0, startIdx);
+          polylines.add(Polyline(
+            polylineId: PolylineId('route_${i}_past'),
+            points: past,
+            color: baseColor.withAlpha((0.18 * 255).round()),
+            width: 4,
+            zIndex: 0,
+          ));
+        }
+      } else {
+        // normal rendering
+        polylines.add(
+          Polyline(
+            polylineId: id,
+            points: r.points,
+            color: polyColor,
+            width: isSelected ? 10 : 5,
+            consumeTapEvents: true,
+            onTap: () => _onSelectRoute(i),
+            zIndex: isSelected ? 3 : 1,
+          ),
+        );
+      }
     }
-    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location permission required for navigation')));
-      return;
+    setState(() => _polylines = polylines);
+  }
+
+  LatLngBounds _boundsFromPoints(List<LatLng> pts) {
+    double south = pts.first.latitude,
+        north = pts.first.latitude,
+        west = pts.first.longitude,
+        east = pts.first.longitude;
+    for (final p in pts) {
+      south = south < p.latitude ? south : p.latitude;
+      north = north > p.latitude ? north : p.latitude;
+      west = west < p.longitude ? west : p.longitude;
+      east = east > p.longitude ? east : p.longitude;
     }
+    return LatLngBounds(
+      southwest: LatLng(south, west),
+      northeast: LatLng(north, east),
+    );
+  }
 
-    setState(() {
-      _navigating = true;
-      _navInstruction = 'Navigation started';
-    });
+  void _startInPlaceNavigation(int routeIndex) {
+    if (_routes.isEmpty || routeIndex < 0 || routeIndex >= _routes.length) return;
+    final route = _routes[routeIndex];
+    final points = route.points;
+    if (points.isEmpty) return;
 
-    // minimize the route panel when navigation starts
-    setState(() {
-      _routePanelVisible = false;
-    });
-
-    _posSub?.cancel();
-    _posSub = Geolocator.getPositionStream(locationSettings: const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 2))
-        .listen((pos) {
-      final loc = LatLng(pos.latitude, pos.longitude);
-      // update user location and instruction
+    _navigationService ??= NavigationService(tts: _tts);
+    // start emitting navigation updates
+    _navigationService!.start(points);
+    _navUpdateSub?.cancel();
+    int lastCameraMs = 0;
+    _navUpdateSub = _navigationService!.updates.listen((update) async {
+      if (!mounted) return;
+      // track previous position for rotation
+      _prevNavLocation = _lastNavUpdate?.userLocation;
       setState(() {
-        _userLat = loc.latitude;
-        _userLng = loc.longitude;
+        _navInstruction = update.instruction;
+        _lastNavUpdate = update;
       });
-      if (_controller != null) {
+      // update visuals
+      _updateMarkers();
+      _buildPolylinesFromRoutes();
+      // Throttled camera follow (every 1200ms)
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - lastCameraMs > 1200) {
+        lastCameraMs = now;
         try {
-          _controller!.animateCamera(CameraUpdate.newLatLng(loc));
+          if (_controller != null) {
+            await _controller!.animateCamera(CameraUpdate.newLatLng(update.userLocation));
+          }
         } catch (_) {}
       }
-
-      // compute nearest point and rudimentary instruction
-      final nearest = _findNearestIndexOnRoute(_routes[routeIndex].points, loc);
-      final nextIdx = math.min(nearest + 1, _routes[routeIndex].points.length - 1);
-      final instr = _deriveInstructionForRoute(_routes[routeIndex].points, nextIdx);
-      final distanceToNext = Geolocator.distanceBetween(loc.latitude, loc.longitude, _routes[routeIndex].points[nextIdx].latitude, _routes[routeIndex].points[nextIdx].longitude);
-      final remaining = _remainingDistanceFromIndexOnRoute(_routes[routeIndex].points, nextIdx);
-      final formattedNext = _formatDistance(distanceToNext);
-      final formattedTotal = _formatDistance(remaining);
-      final newNav = '$instr in $formattedNext • Remaining: $formattedTotal';
-      setState(() {
-        _navInstruction = newNav;
-      });
-      // speak instruction
-      try {
-        _tts?.stop();
-        _tts?.speak('$instr in ${distanceToNext.round()} meters');
-      } catch (_) {}
+    });
+    // persist navigation state so we can resume if app is backgrounded
+    _persistNavigationState(routeIndex, points);
+    setState(() {
+      _navigating = true;
+      _selectedRouteIndex = routeIndex;
     });
   }
 
   void _stopInPlaceNavigation() {
-    _posSub?.cancel();
-    _posSub = null;
+    _navigationService?.stop();
+    _navUpdateSub?.cancel();
+    _navUpdateSub = null;
+    // clear persisted navigation state
+    _clearPersistedNavigation();
     setState(() {
       _navigating = false;
-      _navInstruction = 'Navigation stopped';
+      _navInstruction = 'Press Start to begin navigation';
     });
   }
 
-  int _findNearestIndexOnRoute(List<LatLng> pts, LatLng loc) {
-    if (pts.isEmpty) return 0;
-    double best = double.infinity;
-    int idx = 0;
-    for (int i = 0; i < pts.length; i++) {
-      final d = Geolocator.distanceBetween(loc.latitude, loc.longitude, pts[i].latitude, pts[i].longitude);
-      if (d < best) {
-        best = d;
-        idx = i;
+  // Persist minimal navigation state: selected route index and polyline points
+  Future<void> _persistNavigationState(int selectedIndex, List<LatLng> points) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final pts = points.map((p) => '${p.latitude},${p.longitude}').toList();
+      await prefs.setString('nav_selected_index', selectedIndex.toString());
+      await prefs.setStringList('nav_points', pts);
+    } catch (_) {}
+  }
+
+  Future<void> _clearPersistedNavigation() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('nav_selected_index');
+      await prefs.remove('nav_points');
+    } catch (_) {}
+  }
+
+  Future<void> _restoreNavigationIfAny() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final idxStr = prefs.getString('nav_selected_index');
+      final pts = prefs.getStringList('nav_points');
+      if (idxStr != null && pts != null && pts.isNotEmpty) {
+        final idx = int.tryParse(idxStr) ?? 0;
+        final routePoints = pts.map((s) {
+          final parts = s.split(',');
+          return LatLng(double.parse(parts[0]), double.parse(parts[1]));
+        }).toList();
+  // start navigation quietly (mute TTS for a short window)
+  _navigationService ??= NavigationService(tts: _tts);
+  _navigationService!.start(routePoints, muteOnRestore: true);
+        _navUpdateSub?.cancel();
+        int lastCameraMs = 0;
+        _navUpdateSub = _navigationService!.updates.listen((update) async {
+          if (!mounted) return;
+          _prevNavLocation = _lastNavUpdate?.userLocation;
+          setState(() {
+            _navInstruction = update.instruction;
+            _lastNavUpdate = update;
+            _navigating = true;
+            _selectedRouteIndex = idx;
+          });
+          _updateMarkers();
+          _buildPolylinesFromRoutes();
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - lastCameraMs > 1200) {
+            lastCameraMs = now;
+            try {
+              if (_controller != null) {
+                await _controller!.animateCamera(CameraUpdate.newLatLng(update.userLocation));
+              }
+            } catch (_) {}
+          }
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Navigation resumed')),
+          );
+        }
       }
-    }
-    return idx;
+    } catch (_) {}
   }
 
-  String _deriveInstructionForRoute(List<LatLng> pts, int idx) {
-    if (pts.length < 3) return 'Continue';
-    final prev = (idx - 1).clamp(0, pts.length - 1);
-    final next = (idx + 1).clamp(0, pts.length - 1);
-    final a = pts[prev];
-    final b = pts[idx];
-    final c = pts[next];
-    final bearing1 = _bearing(a, b);
-    final bearing2 = _bearing(b, c);
-    double diff = (bearing2 - bearing1).abs();
-    if (diff > 180) diff = 360 - diff;
-    if (diff < 15) return 'Continue straight';
-    if (bearing2 > bearing1) return 'Turn right';
-    return 'Turn left';
-  }
 
-  double _bearing(LatLng a, LatLng b) {
-    final lat1 = _toRad(a.latitude);
-    final lat2 = _toRad(b.latitude);
-    final dLon = _toRad(b.longitude - a.longitude);
-    final y = math.sin(dLon) * math.cos(lat2);
-    final x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
-    final brng = math.atan2(y, x);
-    return (_toDeg(brng) + 360) % 360;
-  }
+  GoogleMapController? _controller;
+  static const LatLng _center = LatLng(23.0225, 72.5714); // Ahmedabad
+  final TextEditingController _sourceController = TextEditingController();
+  final TextEditingController _destController = TextEditingController();
+  MapType _mapType = MapType.hybrid;
+  bool _trafficEnabled = true;
+  bool _navigating = false;
+  double? _sourceLat;
+  double? _sourceLng;
+  double? _destLat;
+  double? _destLng;
+  FlutterTts? _tts;
+  bool _gettingLocation = false;
+  List suggestions = [];
+  Timer? _debounceTimer;
+  bool _loadingSuggestions = false;
+  bool _showCompare = false;
+  NavigationService? _navigationService;
+  StreamSubscription<NavigationUpdate>? _navUpdateSub;
+  String _navInstruction = 'Press Start to begin navigation';
+  NavigationUpdate? _lastNavUpdate;
+  Set<Marker> _markers = {};
+  Set<Polyline> _polylines = {};
+  List<RouteModel> _routes = [];
+  int? _selectedRouteIndex;
+  bool _routePanelVisible = false;
+  ActiveField _activeField = ActiveField.none;
 
-  double _toRad(double d) => d * math.pi / 180.0;
-  double _toDeg(double r) => r * 180.0 / math.pi;
-
-  double _remainingDistanceFromIndexOnRoute(List<LatLng> pts, int idx) {
-    if (idx >= pts.length - 1) return 0.0;
-    double sum = 0.0;
-    for (int i = idx; i < pts.length - 1; i++) {
-      sum += Geolocator.distanceBetween(pts[i].latitude, pts[i].longitude, pts[i + 1].latitude, pts[i + 1].longitude);
-    }
-    return sum;
-  }
-
-  // Format meters into friendly string (m or km)
-  String _formatDistance(double meters) {
-    if (meters >= 1000) {
-      final km = meters / 1000.0;
-      return '${km.toStringAsFixed(1)} km';
-    }
-    return '${meters.round()} m';
-  }
-
-  // Compact, non-editable top bar shown while navigating
   Widget _buildCompactRouteBar() {
-    final src = _sourceController.text.trim().isNotEmpty ? _sourceController.text.trim() : 'Origin';
-    final dst = _destController.text.trim().isNotEmpty ? _destController.text.trim() : 'Destination';
+    final src = _sourceController.text.trim().isNotEmpty
+        ? _sourceController.text.trim()
+        : 'Origin';
+    final dst = _destController.text.trim().isNotEmpty
+        ? _destController.text.trim()
+        : 'Destination';
     return SizedBox(
       height: 56,
       child: Row(
@@ -477,46 +537,259 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: Text('$src → $dst', style: const TextStyle(fontWeight: FontWeight.w600)),
+              child: Text(
+                '$src → $dst',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
             ),
           ),
           IconButton(
             icon: const Icon(Icons.close),
             onPressed: () {
-              // stop navigation and restore controls
               if (_navigating) _stopInPlaceNavigation();
             },
-          )
+          ),
         ],
       ),
     );
   }
 
+  Widget _maneuverIconFor(String instr) {
+    final t = instr.toLowerCase();
+    if (t.contains('left')) return const Icon(Icons.turn_left, color: Colors.black87);
+    if (t.contains('right')) return const Icon(Icons.turn_right, color: Colors.black87);
+    return const Icon(Icons.arrow_upward, color: Colors.black87);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("SafeRoute Map")),
+      appBar: AppBar(
+        title: const Text("SafeRoute Map"),
+        actions: [
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'traffic') {
+                setState(() => _trafficEnabled = !_trafficEnabled);
+              } else {
+                setState(() {
+                  switch (v) {
+                    case 'normal':
+                      _mapType = MapType.normal;
+                      break;
+                    case 'hybrid':
+                      _mapType = MapType.hybrid;
+                      break;
+                    case 'satellite':
+                      _mapType = MapType.satellite;
+                      break;
+                    case 'terrain':
+                      _mapType = MapType.terrain;
+                      break;
+                    default:
+                      _mapType = MapType.satellite;
+                  }
+                });
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'normal',
+                child: Row(
+                  children: [
+                    if (_mapType == MapType.normal)
+                      const Icon(Icons.check, size: 18)
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 8),
+                    const Text('Normal'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'hybrid',
+                child: Row(
+                  children: [
+                    if (_mapType == MapType.hybrid)
+                      const Icon(Icons.check, size: 18)
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 8),
+                    const Text('Hybrid'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'satellite',
+                child: Row(
+                  children: [
+                    if (_mapType == MapType.satellite)
+                      const Icon(Icons.check, size: 18)
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 8),
+                    const Text('Satellite'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'terrain',
+                child: Row(
+                  children: [
+                    if (_mapType == MapType.terrain)
+                      const Icon(Icons.check, size: 18)
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 8),
+                    const Text('Terrain'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'traffic',
+                child: Text(
+                  _trafficEnabled ? 'Disable Traffic' : 'Enable Traffic',
+                ),
+              ),
+            ],
+            icon: const Icon(Icons.map),
+          ),
+          IconButton(
+            icon: const Icon(Icons.record_voice_over),
+            onPressed: () async {
+              // show small popup dialog for TTS settings
+              final settings = Provider.of<TtsSettings>(context, listen: false);
+              String selectedLang = settings.language;
+              // Ensure selectedLang is a valid dropdown value
+              const supportedLangs = ['en-US', 'hi-IN'];
+              if (!supportedLangs.contains(selectedLang)) {
+                selectedLang = 'en-US';
+              }
+              double selectedRate = settings.rate;
+              if (!mounted) return;
+              await showDialog<void>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('TTS Settings'),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedLang,
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'en-US',
+                            child: Text('English'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'hi-IN',
+                            child: Text('Hindi'),
+                          ),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) selectedLang = v;
+                        },
+                        decoration: const InputDecoration(
+                          labelText: 'Language',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Text('Rate'),
+                          Expanded(
+                            child: StatefulBuilder(
+                              builder: (c, setStateSB) {
+                                return Slider(
+                                  value: selectedRate,
+                                  min: 0.2,
+                                  max: 1.0,
+                                  divisions: 8,
+                                  label: selectedRate.toStringAsFixed(2),
+                                  onChanged: (v) =>
+                                      setStateSB(() => selectedRate = v),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        // close dialog first (avoid using dialog context after async await)
+                        Navigator.of(ctx).pop();
+                        // apply settings to provider and live TTS
+                        await settings.setLanguage(selectedLang);
+                        await settings.setRate(selectedRate);
+                        try {
+                          await _tts?.setLanguage(selectedLang);
+                          await _tts?.setSpeechRate(selectedRate);
+                        } catch (_) {}
+                      },
+                      child: const Text('Submit'),
+                    ),
+                  ],
+                ),
+              );
+            },
+            tooltip: 'TTS Settings',
+          ),
+        ],
+      ),
       drawer: Drawer(
         child: ListView(
           padding: EdgeInsets.zero,
           children: [
             const DrawerHeader(
               decoration: BoxDecoration(color: Colors.indigo),
-              child: Text('SafeRoute', style: TextStyle(color: Colors.white, fontSize: 20)),
+              child: Text(
+                'SafeRoute',
+                style: TextStyle(color: Colors.white, fontSize: 20),
+              ),
             ),
-            ListTile(title: const Text('Home'), onTap: () => Navigator.pushReplacementNamed(context, '/')),
-            ListTile(title: const Text('Profile'), onTap: () => Navigator.pushNamed(context, '/profile')),
-            ListTile(title: const Text('Settings'), onTap: () => Navigator.pushNamed(context, '/settings')),
-            ListTile(title: const Text('Onboarding'), onTap: () => Navigator.pushNamed(context, '/onboarding')),
-            ListTile(title: const Text('Map Detail'), onTap: () => Navigator.pushNamed(context, '/map_detail')),
-            ListTile(title: const Text('Contacts'), onTap: () => Navigator.pushNamed(context, '/contacts')),
-            ListTile(title: const Text('Logout'), onTap: () => Navigator.pushReplacementNamed(context, '/login')),
+            ListTile(
+              title: const Text('Home'),
+              onTap: () => Navigator.pushReplacementNamed(context, '/'),
+            ),
+            ListTile(
+              title: const Text('Profile'),
+              onTap: () => Navigator.pushNamed(context, '/profile'),
+            ),
+            ListTile(
+              title: const Text('Settings'),
+              onTap: () => Navigator.pushNamed(context, '/settings'),
+            ),
+            ListTile(
+              title: const Text('Onboarding'),
+              onTap: () => Navigator.pushNamed(context, '/onboarding'),
+            ),
+            ListTile(
+              title: const Text('Map Detail'),
+              onTap: () => Navigator.pushNamed(context, '/map_detail'),
+            ),
+            ListTile(
+              title: const Text('Contacts'),
+              onTap: () => Navigator.pushNamed(context, '/contacts'),
+            ),
+            ListTile(
+              title: const Text('Logout'),
+              onTap: () => Navigator.pushReplacementNamed(context, '/login'),
+            ),
           ],
         ),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Padding(
+          Column(
+            children: [
+              Padding(
             padding: const EdgeInsets.all(12.0),
             child: Column(
               children: [
@@ -524,148 +797,176 @@ class _HomeScreenState extends State<HomeScreen> {
                   _buildCompactRouteBar()
                 else
                   TextField(
-                  controller: _sourceController,
-                  decoration: InputDecoration(
-                    labelText: 'Source',
-                    hintText: 'Type origin or use current location',
-                    prefixIcon: const Icon(Icons.my_location),
-                    // suffix button: fetch current location or clear
-                    suffixIcon: _gettingLocation
-                        ? const Padding(
-                            padding: EdgeInsets.all(8.0),
-                            child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                          )
-                        : IconButton(
-                      tooltip: 'Use current location / Clear',
-                      icon: _sourceLat != null && _sourceLng != null ? const Icon(Icons.clear) : const Icon(Icons.gps_fixed),
-                      onPressed: () async {
-                        if (_sourceLat != null && _sourceLng != null) {
-                          // clear stored coords and text so user can type
-                          setState(() {
-                            _sourceLat = null;
-                            _sourceLng = null;
-                            _sourceController.clear();
-                          });
-                          return;
-                        }
-
-                        setState(() => _gettingLocation = true);
-                        try {
-                          LocationPermission permission = await Geolocator.checkPermission();
-                          if (permission == LocationPermission.denied) {
-                            permission = await Geolocator.requestPermission();
-                          }
-                          if (permission == LocationPermission.deniedForever || permission == LocationPermission.denied) {
-                            if (mounted) _sourceController.text = 'Location permission denied';
-                          } else {
-                            final locationSettings = const LocationSettings(accuracy: LocationAccuracy.high);
-                            final pos = await Geolocator.getCurrentPosition(locationSettings: locationSettings);
-                            if (mounted) {
-                              try {
-                                final placemarks = await geocoding.placemarkFromCoordinates(pos.latitude, pos.longitude);
-                                if (placemarks.isNotEmpty) {
-                                  final pm = placemarks.first;
-                                  _sourceController.text = '${pm.name ?? ''} ${pm.street ?? ''}, ${pm.locality ?? ''}'.trim();
-                                } else {
-                                  _sourceController.text = '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}';
+                    controller: _sourceController,
+                    decoration: InputDecoration(
+                      labelText: 'Source',
+                      hintText: 'Type origin or use current location',
+                      prefixIcon: const Icon(Icons.my_location),
+                      suffixIcon: _gettingLocation
+                          ? const Padding(
+                              padding: EdgeInsets.all(8.0),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            )
+                          : IconButton(
+                              tooltip: 'Use current location / Clear',
+                              icon: _sourceLat != null && _sourceLng != null
+                                  ? const Icon(Icons.clear)
+                                  : const Icon(Icons.gps_fixed),
+                              onPressed: () async {
+                                if (_sourceLat != null && _sourceLng != null) {
+                                  setState(() {
+                                    _sourceLat = null;
+                                    _sourceLng = null;
+                                    _sourceController.clear();
+                                  });
+                                  return;
                                 }
-                              } catch (_) {
-                                _sourceController.text = '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}';
-                              }
-                              _sourceLat = pos.latitude;
-                              _sourceLng = pos.longitude;
-                              _updateMarkers();
-                            }
-                          }
-                        } catch (e) {
-                          if (mounted) _sourceController.text = 'Unable to get location';
-                        } finally {
-                          if (mounted) setState(() => _gettingLocation = false);
-                        }
-                      },
+
+                                setState(() => _gettingLocation = true);
+                                try {
+                                  LocationPermission permission =
+                                      await Geolocator.checkPermission();
+                                  if (permission == LocationPermission.denied) {
+                                    permission =
+                                        await Geolocator.requestPermission();
+                                  }
+                                  if (permission ==
+                                          LocationPermission.deniedForever ||
+                                      permission == LocationPermission.denied) {
+                                    if (mounted) {
+                                      _sourceController.text =
+                                          'Location permission denied';
+                                    }
+                                  } else {
+                                    final locationSettings =
+                                        const LocationSettings(
+                                          accuracy: LocationAccuracy.high,
+                                        );
+                                    final pos =
+                                        await Geolocator.getCurrentPosition(
+                                          locationSettings: locationSettings,
+                                        );
+                                    if (!mounted) return;
+                                    try {
+                                      final placemarks = await geocoding
+                                          .placemarkFromCoordinates(
+                                            pos.latitude,
+                                            pos.longitude,
+                                          );
+                                      if (placemarks.isNotEmpty) {
+                                        final pm = placemarks.first;
+                                        _sourceController.text =
+                                            '${pm.name ?? ''} ${pm.street ?? ''}, ${pm.locality ?? ''}'
+                                                .trim();
+                                      } else {
+                                        _sourceController.text =
+                                            '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}';
+                                      }
+                                    } catch (_) {
+                                      _sourceController.text =
+                                          '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}';
+                                    }
+                                    _sourceLat = pos.latitude;
+                                    _sourceLng = pos.longitude;
+                                    _updateMarkers();
+                                  }
+                                } catch (e) {
+                                  if (mounted){
+                                    _sourceController.text =
+                                        'Unable to get location';}
+                                } finally {
+                                  if (mounted){
+                                    setState(() => _gettingLocation = false);}
+                                }
+                              },
+                            ),
                     ),
+                    onChanged: (v) {
+                      if (_sourceLat != null || _sourceLng != null) {
+                        setState(() {
+                          _sourceLat = null;
+                          _sourceLng = null;
+                        });
+                      }
+                    },
                   ),
-                  onChanged: (v) {
-                    // If user edits the source text manually, clear stored coordinates so
-                    // we treat it as a typed address that may need geocoding.
-                    if (_sourceLat != null || _sourceLng != null) {
-                      setState(() {
-                        _sourceLat = null;
-                        _sourceLng = null;
-                      });
-                    }
-                  },
-                ),
                 const SizedBox(height: 8),
                 if (!_navigating)
                   TextField(
-                  controller: _destController,
-                  decoration: const InputDecoration(
-                    labelText: 'Destination',
-                    hintText: 'Start typing destination...',
-                    prefixIcon: Icon(Icons.search),
-                  ),
-                  onChanged: (value) async {
-                    final hasText = value.trim().isNotEmpty;
-                    if (hasText && !_showCompare) {
-                      setState(() => _showCompare = true);
-                    } else if (!hasText && _showCompare) {
-                      setState(() => _showCompare = false);
-                    }
+                    controller: _destController,
+                    decoration: const InputDecoration(
+                      labelText: 'Destination',
+                      hintText: 'Start typing destination...',
+                      prefixIcon: Icon(Icons.search),
+                    ),
+                    onChanged: (value) async {
+                      final hasText = value.trim().isNotEmpty;
+                      if (hasText && !_showCompare) {
+                        setState(() => _showCompare = true);
+                      } else if (!hasText && _showCompare) {
+                        setState(() => _showCompare = false);
+                      }
 
-                    // Autocomplete suggestions with debounce
-                    _debounceTimer?.cancel();
-                    if (hasText) {
-                      setState(() {
-                        _loadingSuggestions = true;
-                      });
-                      _debounceTimer = Timer(const Duration(milliseconds: 400), () async {
-                        try {
-                          final preds = await _placesService.autocomplete(value);
-                          if (mounted) {
-                            if (preds.isEmpty) {
-                              // fallback: show the typed text as a synthetic suggestion so user can tap to geocode
-                              setState(() => suggestions = [
-                                    {
-                                      'description': value,
-                                      'synthetic': true,
-                                    }
-                                  ]);
-                            } else {
-                              setState(() => suggestions = preds);
+                      _debounceTimer?.cancel();
+                      if (hasText) {
+                        setState(() => _loadingSuggestions = true);
+                        _debounceTimer = Timer(
+                          const Duration(milliseconds: 400),
+                          () async {
+                            try {
+                              final preds = await _placesService.autocomplete(
+                                value,
+                              );
+                              if (!mounted) return;
+                              if (preds.isEmpty) {
+                                setState(
+                                  () => suggestions = [
+                                    {'description': value, 'synthetic': true},
+                                  ],
+                                );
+                              } else {
+                                setState(() => suggestions = preds);
+                              }
+                            } catch (_) {
+                              if (!mounted) return;
+                              setState(() {
+                                suggestions = [
+                                  {'description': value, 'synthetic': true},
+                                ];
+                              });
+                            } finally {
+                              if (mounted) {
+                                setState(() => _loadingSuggestions = false);
+                              }
                             }
-                          }
-                        } catch (_) {
-                          if (mounted) {
-                            // on error, provide the typed value as fallback
-                            setState(() => suggestions = [
-                                  {
-                                    'description': value,
-                                    'synthetic': true,
-                                  }
-                                ]);
-                          }
-                        } finally {
-                          if (mounted) { setState(() => _loadingSuggestions = false); }
+                          },
+                        );
+                      } else {
+                        if (mounted) {
+                          setState(() {
+                            suggestions = [];
+                            _loadingSuggestions = false;
+                          });
                         }
-                      });
-                    } else {
-                      if (mounted) { setState(() {
-                        suggestions = [];
-                        _loadingSuggestions = false;
-                      }); }
-                    }
-
-                    // No automatic filling of source when typing destination anymore.
-                    // Users can type an origin or tap the location icon on the source field.
-                  },
-                ),
-                // suggestions list
-                // suggestions area
+                      }
+                    },
+                  ),
                 if (_loadingSuggestions)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 8.0),
-                    child: Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))),
+                    child: Center(
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
                   ),
                 if (!_loadingSuggestions && suggestions.isNotEmpty)
                   ConstrainedBox(
@@ -676,11 +977,15 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemBuilder: (context, index) {
                         final item = suggestions[index];
                         String desc = '';
-                        final bool synthetic = (item is Map && item['synthetic'] == true);
+                        final bool synthetic =
+                            (item is Map && item['synthetic'] == true);
                         if (synthetic) {
                           desc = (item['description'] ?? '').toString();
                         } else if (item is AutocompletePrediction) {
-                          desc = item.description ?? item.structuredFormatting?.mainText ?? '';
+                          desc =
+                              item.description ??
+                              item.structuredFormatting?.mainText ??
+                              '';
                         } else {
                           desc = item.toString();
                         }
@@ -694,48 +999,69 @@ class _HomeScreenState extends State<HomeScreen> {
                               _sourceController.text = desc;
                               if (synthetic) {
                                 try {
-                                  final locations = await geocoding.locationFromAddress(desc);
+                                  final locations = await geocoding
+                                      .locationFromAddress(desc);
                                   if (locations.isNotEmpty) {
                                     final loc = locations.first;
                                     _sourceLat = loc.latitude;
                                     _sourceLng = loc.longitude;
-                                    if (_controller != null) _controller!.animateCamera(CameraUpdate.newLatLng(LatLng(_sourceLat!, _sourceLng!)));
+                                    if (_controller != null)
+                                      {_controller!.animateCamera(
+                                        CameraUpdate.newLatLng(
+                                          LatLng(_sourceLat!, _sourceLng!),
+                                        ),
+                                      );}
                                     _updateMarkers();
                                   }
                                 } catch (_) {}
-                              } else if (item is AutocompletePrediction && item.placeId != null) {
-                                final details = await _placesService.getPlaceDetails(item.placeId!);
+                              } else if (item is AutocompletePrediction &&
+                                  item.placeId != null) {
+                                final details = await _placesService
+                                    .getPlaceDetails(item.placeId!);
                                 final lat = details?.geometry?.location?.lat;
                                 final lng = details?.geometry?.location?.lng;
                                 if (lat != null && lng != null) {
                                   _sourceLat = lat;
                                   _sourceLng = lng;
-                                  if (_controller != null) _controller!.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
+                                  if (_controller != null)
+                                    {_controller!.animateCamera(
+                                      CameraUpdate.newLatLng(LatLng(lat, lng)),
+                                    );}
                                   _updateMarkers();
                                 }
                               }
                             } else {
-                              // default: destination
                               _destController.text = desc;
                               if (synthetic) {
                                 try {
-                                  final locations = await geocoding.locationFromAddress(desc);
+                                  final locations = await geocoding
+                                      .locationFromAddress(desc);
                                   if (locations.isNotEmpty) {
                                     final loc = locations.first;
                                     _destLat = loc.latitude;
                                     _destLng = loc.longitude;
-                                    if (_controller != null) _controller!.animateCamera(CameraUpdate.newLatLng(LatLng(_destLat!, _destLng!)));
+                                    if (_controller != null)
+                                      {_controller!.animateCamera(
+                                        CameraUpdate.newLatLng(
+                                          LatLng(_destLat!, _destLng!),
+                                        ),
+                                      );}
                                     _updateMarkers();
                                   }
                                 } catch (_) {}
-                              } else if (item is AutocompletePrediction && item.placeId != null) {
-                                final details = await _placesService.getPlaceDetails(item.placeId!);
+                              } else if (item is AutocompletePrediction &&
+                                  item.placeId != null) {
+                                final details = await _placesService
+                                    .getPlaceDetails(item.placeId!);
                                 final lat = details?.geometry?.location?.lat;
                                 final lng = details?.geometry?.location?.lng;
                                 if (lat != null && lng != null) {
                                   _destLat = lat;
                                   _destLng = lng;
-                                  if (_controller != null) _controller!.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
+                                  if (_controller != null)
+                                    {_controller!.animateCamera(
+                                      CameraUpdate.newLatLng(LatLng(lat, lng)),
+                                    );}
                                   _updateMarkers();
                                 }
                               }
@@ -759,24 +1085,47 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
+
           // Inline navigation instruction bar
           if (_navigating)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: _routePanelVisible ? 272 : 24,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12.0),
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 350),
                 child: Card(
-                  key: ValueKey(_navInstruction),
+                  key: ValueKey(_lastNavUpdate?.spoken ?? _navInstruction),
                   elevation: 6,
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 350),
                     padding: const EdgeInsets.all(8.0),
                     child: Row(
                       children: [
-                        Expanded(child: Text(_navInstruction, style: const TextStyle(fontWeight: FontWeight.w600))),
-                        ElevatedButton(onPressed: _stopInPlaceNavigation, child: const Text('Stop'))
+                        if (_lastNavUpdate != null) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8.0),
+                            child: _maneuverIconFor(_lastNavUpdate!.instruction),
+                          ),
+                        ],
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _lastNavUpdate?.spoken ?? _navInstruction,
+                                style: const TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              if (_lastNavUpdate != null)
+                                Text(
+                                  'Next in ${formatDistance(_lastNavUpdate!.distanceToNext)} • ${formatDistance(_lastNavUpdate!.remainingDistance)} left',
+                                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                                ),
+                            ],
+                          ),
+                        ),
+                        ElevatedButton(
+                          onPressed: _stopInPlaceNavigation,
+                          child: const Text('Stop'),
+                        ),
                       ],
                     ),
                   ),
@@ -787,14 +1136,23 @@ class _HomeScreenState extends State<HomeScreen> {
           // Expanded map below the controls
           Expanded(
             child: GoogleMap(
-              onMapCreated: (controller) => _controller = controller,
-              initialCameraPosition: const CameraPosition(target: _center, zoom: 14),
+              onMapCreated: _onMapCreated,
+              initialCameraPosition: const CameraPosition(
+                target: _center,
+                zoom: 13,
+              ),
               myLocationEnabled: true,
               polylines: _polylines,
               markers: _markers,
+              mapType: _mapType,
+              trafficEnabled: _trafficEnabled,
+              onTap: (_) => setState(() => _routePanelVisible = false),
             ),
           ),
-          // Route options panel (in-place) - appears over map when routes are present
+
+          ],
+          ),
+          // Route options panel (in-place) as overlay
           if (_routePanelVisible)
             Positioned(
               bottom: 0,
@@ -803,37 +1161,71 @@ class _HomeScreenState extends State<HomeScreen> {
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 300),
                 curve: Curves.easeInOut,
-                color: Colors.white,
                 height: _navigating ? 120 : 260,
-                child: _navigating
+                child: Material(
+                  elevation: 12,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+                    child: Container(
+                      color: Colors.white,
+                      child: _navigating
                     ? Padding(
                         padding: const EdgeInsets.all(8.0),
                         child: Row(
                           children: [
-                            Expanded(child: Text('Routes available: ${_routes.length}', style: const TextStyle(fontWeight: FontWeight.w700))),
+                            Expanded(
+                              child: Text(
+                                'Routes available: ${_routes.length}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
                             IconButton(
                               icon: const Icon(Icons.expand_less),
-                              onPressed: () => setState(() => _routePanelVisible = false),
-                            )
+                              onPressed: () =>
+                                  setState(() => _routePanelVisible = false),
+                            ),
                           ],
                         ),
                       )
                     : Column(
                         children: [
+                          // Drag handle and header
                           Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            padding: const EdgeInsets.symmetric(vertical: 8.0),
+                            child: Column(
                               children: [
-                                const Text('Routes', style: TextStyle(fontWeight: FontWeight.w700)),
-                                IconButton(
-                                  icon: const Icon(Icons.close),
-                                  onPressed: () {
-                                    setState(() {
-                                      _routePanelVisible = false;
-                                    });
-                                  },
-                                )
+                                Container(
+                                  width: 48,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey[300],
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      const Text(
+                                        'Routes',
+                                        style: TextStyle(fontWeight: FontWeight.w700),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.close),
+                                        onPressed: () {
+                                          setState(() {
+                                            _routePanelVisible = false;
+                                          });
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -843,96 +1235,88 @@ class _HomeScreenState extends State<HomeScreen> {
                               itemBuilder: (context, index) {
                                 final r = _routes[index];
                                 final selected = _selectedRouteIndex == index;
-                                return ListTile(
-                                  selected: selected,
-                                  leading: r.color != null
-                                      ? Container(width: 12, height: 12, decoration: BoxDecoration(color: _parseColorString(r.color) ?? Colors.blueGrey, shape: BoxShape.circle))
-                                      : null,
-                                  title: Text('Route ${index + 1}${selected ? ' (selected)' : ''}'),
-                                  subtitle: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text('Safety: ${r.safetyScore.toStringAsFixed(2)}'),
-                                      if (r.distanceText.isNotEmpty) Text('Distance: ${r.distanceText}'),
-                                      if (r.durationText.isNotEmpty) Text('Duration: ${r.durationText}'),
-                                    ],
-                                  ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: const Icon(Icons.map),
-                                        onPressed: () {
-                                          _onSelectRoute(index);
-                                        },
-                                      ),
-                                      IconButton(
-                                        icon: Icon(_navigating && _selectedRouteIndex == index ? Icons.stop : Icons.navigation),
-                                        onPressed: () {
-                                          if (_navigating && _selectedRouteIndex == index) {
-                                            _stopInPlaceNavigation();
-                                          } else {
-                                            _startInPlaceNavigation(index);
-                                          }
-                                        },
-                                      ),
-                                    ],
+                                return Container(
+                                  color: selected ? Colors.blue.shade50 : null,
+                                  child: ListTile(
+                                    selected: selected,
+                                    leading: r.color != null
+                                        ? Container(
+                                            width: 12,
+                                            height: 12,
+                                            decoration: BoxDecoration(
+                                              color: parseColorString(r.color) ??
+                                                  Colors.blueGrey,
+                                              shape: BoxShape.circle,
+                                            ),
+                                          )
+                                        : null,
+                                    title: Text(
+                                      'Route ${index + 1}${selected ? ' (selected)' : ''}',
+                                    ),
+                                    subtitle: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Safety: ${r.safetyScore.toStringAsFixed(2)}',
+                                        ),
+                                        if (r.distanceText.isNotEmpty)
+                                          Text('Distance: ${r.distanceText}'),
+                                        if (r.durationText.isNotEmpty)
+                                          Text('Duration: ${r.durationText}'),
+                                      ],
+                                    ),
+                                    onTap: () => _onSelectRoute(index),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          icon: Icon(
+                                            _navigating &&
+                                                    _selectedRouteIndex == index
+                                                ? Icons.stop
+                                                : Icons.navigation,
+                                          ),
+                                          onPressed: () {
+                                            if (_navigating &&
+                                                _selectedRouteIndex == index) {
+                                              _stopInPlaceNavigation();
+                                            } else {
+                                              _startInPlaceNavigation(index);
+                                            }
+                                          },
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 );
                               },
                             ),
-                          )
+                          ),
                         ],
                       ),
               ),
+                  ),
+                ),
             ),
-        ],
+      )],
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          if (_navigating) {
-            // toggle the route options panel (minimized) when navigating
-            setState(() => _routePanelVisible = !_routePanelVisible);
-          } else {
-            // when not navigating, act as quick Compare Routes
-            _fetchRoutesInPlace();
-          }
-        },
-        label: const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 6.0),
-          child: Text('Route Options'),
-        ),
-      ),
+      floatingActionButton: _routePanelVisible
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: () {
+                if (_navigating) {
+                  setState(() => _routePanelVisible = !_routePanelVisible);
+                } else {
+                  _fetchRoutesInPlace();
+                }
+              },
+              label: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6.0),
+                child: Text('Route Options'),
+              ),
+            ),
     );
-  }
-
-  @override
-  void dispose() {
-    _controller?.dispose();
-    _sourceController.dispose();
-    _destController.dispose();
-    super.dispose();
-  }
-
-  void _updateMarkers() {
-    final markers = <Marker>{};
-    if (_sourceLat != null && _sourceLng != null) {
-      markers.add(Marker(
-        markerId: const MarkerId('origin'),
-        position: LatLng(_sourceLat!, _sourceLng!),
-        infoWindow: InfoWindow(title: 'Origin', snippet: _sourceController.text),
-      ));
-    }
-    if (_destLat != null && _destLng != null) {
-      markers.add(Marker(
-        markerId: const MarkerId('destination'),
-        position: LatLng(_destLat!, _destLng!),
-        infoWindow: InfoWindow(title: 'Destination', snippet: _destController.text),
-      ));
-    }
-    setState(() => _markers
-      ..clear()
-      ..addAll(markers));
   }
 }

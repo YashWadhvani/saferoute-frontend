@@ -2,7 +2,13 @@ import 'package:google_place/google_place.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-class PlacesService {
+/// Lightweight interface for places lookups to allow test injection.
+abstract class IPlacesService {
+  Future<List<AutocompletePrediction>> autocomplete(String input);
+  Future<DetailsResult?> getPlaceDetails(String placeId);
+}
+
+class PlacesService implements IPlacesService {
   final GooglePlace _googlePlace;
 
   PlacesService._(this._googlePlace);
@@ -13,6 +19,7 @@ class PlacesService {
   }
 
   /// Autocomplete predictions for input text.
+  @override
   Future<List<AutocompletePrediction>> autocomplete(String input) async {
     if (input.trim().isEmpty) return [];
     try {
@@ -35,7 +42,10 @@ class PlacesService {
     }
   }
 
+  // no extra location-biased method; callers should use autocomplete() and local heuristics
+
   /// Get place details (especially lat/lng) from a placeId
+  @override
   Future<DetailsResult?> getPlaceDetails(String placeId) async {
     final result = await _googlePlace.details.get(placeId);
     return result?.result;

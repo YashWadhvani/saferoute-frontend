@@ -1,9 +1,14 @@
+// screens/route_suggestion_screen.dart
+// Legacy/full-screen route suggestion UI; still available but HomeScreen now has in-place compare.
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'dart:math' as math;
 import '../services/route_service.dart';
 import 'navigation_screen.dart';
+import '../models/route_model.dart';
+import '../utils/polyline_utils.dart';
+import '../utils/color_utils.dart';
 
 /// Expected backend response schema (assumed):
 /// {
@@ -288,7 +293,7 @@ class _RouteSuggestionScreenState extends State<RouteSuggestionScreen> {
       final id = PolylineId('route_$i');
       final isSelected = _selectedRouteIndex != null && _selectedRouteIndex == i;
       // If server provided a color string, try to parse it and use it.
-      Color? parsed = _parseColorString(r.color);
+  Color? parsed = parseColorString(r.color);
 
       // Fallback: determine color from safetyScore. Support both 0-1 and 0-5 scales.
       double score = r.safetyScore;
@@ -361,80 +366,7 @@ class _RouteSuggestionScreenState extends State<RouteSuggestionScreen> {
     }
   }
 
-  // decode encoded polyline algorithm (Google polyline)
-  List<LatLng> decodePolyline(String encoded) {
-    final List<LatLng> points = [];
-    int index = 0;
-    int len = encoded.length;
-    int lat = 0;
-    int lng = 0;
-
-    while (index < len) {
-      int b;
-      int shift = 0;
-      int result = 0;
-      do {
-        b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-      int dlat = ((result & 1) != 0) ? ~(result >> 1) : (result >> 1);
-      lat += dlat;
-
-      shift = 0;
-      result = 0;
-      do {
-        b = encoded.codeUnitAt(index++) - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-      int dlng = ((result & 1) != 0) ? ~(result >> 1) : (result >> 1);
-      lng += dlng;
-
-      points.add(LatLng(lat / 1e5, lng / 1e5));
-    }
-    return points;
-  }
-
-  Color _colorFromName(String name) {
-    final c = name.toLowerCase();
-    if (c.contains('yellow')) return Colors.yellow;
-    if (c.contains('green')) return Colors.green;
-    if (c.contains('red')) return Colors.red;
-    if (c.contains('orange')) return Colors.orange;
-    if (c.contains('blue')) return Colors.blue;
-    return Colors.blueGrey;
-  }
-
-  /// Parse backend-provided color string into a [Color]. Supports:
-  /// - hex `#RRGGBB` or `#AARRGGBB`
-  /// - `0xAARRGGBB` style
-  /// - simple color names like 'green', 'red'
-  Color? _parseColorString(String? input) {
-    if (input == null || input.trim().isEmpty) return null;
-    final s = input.trim();
-    try {
-      if (s.startsWith('#')) {
-        final hex = s.substring(1);
-        if (hex.length == 6) {
-          // RRGGBB -> add FF alpha
-          final v = int.parse('FF$hex', radix: 16);
-          return Color(v);
-        } else if (hex.length == 8) {
-          final v = int.parse(hex, radix: 16);
-          return Color(v);
-        }
-      }
-      if (s.startsWith('0x')) {
-        final v = int.parse(s);
-        return Color(v);
-      }
-      // fallback: named colors
-      return _colorFromName(s);
-    } catch (e) {
-      return null;
-    }
-  }
+  // local polyline/color helpers migrated to shared utils
 
   void _updateMarkers() {
     final markers = <Marker>{};
@@ -515,9 +447,9 @@ class _RouteSuggestionScreenState extends State<RouteSuggestionScreen> {
                           return ListTile(
                             selected: selected,
                             selectedTileColor: Color.fromRGBO(33, 150, 243, 0.08),
-                            leading: r.color != null
-                                ? Container(width: 12, height: 12, decoration: BoxDecoration(color: _colorFromName(r.color!), shape: BoxShape.circle))
-                                : null,
+              leading: r.color != null
+                ? Container(width: 12, height: 12, decoration: BoxDecoration(color: parseColorString(r.color) ?? Colors.blueGrey, shape: BoxShape.circle))
+                : null,
                             title: Text('Route ${index + 1}'),
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -568,23 +500,5 @@ class _RouteSuggestionScreenState extends State<RouteSuggestionScreen> {
   }
 }
 
-class RouteModel {
-  final String id;
-  final List<LatLng> points;
-  final double safetyScore;
-  final String? color;
-  final List<String> tags;
-  final String distanceText;
-  final String durationText;
-
-  RouteModel({
-    required this.id,
-    required this.points,
-    required this.safetyScore,
-    this.color,
-    this.tags = const [],
-    this.distanceText = '',
-    this.durationText = '',
-  });
-}
+// Use shared RouteModel from models/route_model.dart
 
