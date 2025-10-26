@@ -383,9 +383,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final points = route.points;
     if (points.isEmpty) return;
 
+    final settings = Provider.of<TtsSettings>(context, listen: false);
     _navigationService ??= NavigationService(tts: _tts);
     // start emitting navigation updates
-    _navigationService!.start(points);
+    _navigationService!.start(points, language: settings.language, rate: settings.rate);
     _navUpdateSub?.cancel();
     int lastCameraMs = 0;
     _navUpdateSub = _navigationService!.updates.listen((update) async {
@@ -460,8 +461,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           return LatLng(double.parse(parts[0]), double.parse(parts[1]));
         }).toList();
   // start navigation quietly (mute TTS for a short window)
-  _navigationService ??= NavigationService(tts: _tts);
-  _navigationService!.start(routePoints, muteOnRestore: true);
+    final settings = Provider.of<TtsSettings>(context, listen: false);
+    _navigationService ??= NavigationService(tts: _tts);
+    _navigationService!.start(routePoints, language: settings.language, rate: settings.rate, muteOnRestore: true);
         _navUpdateSub?.cancel();
         int lastCameraMs = 0;
         _navUpdateSub = _navigationService!.updates.listen((update) async {

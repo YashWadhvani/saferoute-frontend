@@ -79,7 +79,57 @@ class NavigationService {
           bucket = buckets[i];
         }
       }
-      final maybeSpoken = bucket == 10 ? instr : '$instr for ${distanceToNext.round()} meters';
+      // Helpers: format distance for speech with unit conversion and pluralization
+      String _englishDistance(double meters) {
+        if (meters >= 1000) {
+          final km = meters / 1000.0;
+          final kmStr = km.toStringAsFixed(1);
+          final kmVal = double.parse(kmStr);
+          return kmVal == 1.0 ? '$kmStr kilometer' : '$kmStr kilometers';
+        }
+        final m = meters.round();
+        return m == 1 ? '$m meter' : '$m meters';
+      }
+
+      String _hindiDistance(double meters) {
+        if (meters >= 1000) {
+          final km = meters / 1000.0;
+          final kmStr = km.toStringAsFixed(1);
+          return '$kmStr किलोमीटर में';
+        }
+        final m = meters.round();
+        return '$m मीटर में';
+      }
+
+      // Build the spoken string according to requested language (English default)
+      String buildSpoken(String instrText, double distanceMeters, String? lang, bool isFinal) {
+        final lower = instrText.toLowerCase();
+  final isContinue = lower.contains('continue');
+
+        if (lang != null && lang.toLowerCase().startsWith('hi')) {
+          // Hindi translations (simple rule-based mapping)
+          final base = () {
+            if (lower.contains('turn left')) return 'बाएं मुड़ें';
+            if (lower.contains('turn right')) return 'दाएं मुड़ें';
+            if (lower.contains('continue straight')) return 'सीधे जाएँ';
+            return 'आगे बढ़ते रहें';
+          }();
+          if (isFinal) return 'अब $base'; // e.g. "अब बाएं मुड़ें"
+          // For continue -> use "for" semantics in English; in Hindi keep "... में" which we attach in _hindiDistance
+          return '$base ${_hindiDistance(distanceMeters)}';
+        }
+
+        // English phrasing: use "for" when continuing straight, "in" for turns
+        if (isFinal) return 'Now $instrText';
+        final distStr = _englishDistance(distanceMeters);
+        if (isContinue) {
+          return '$instrText for $distStr';
+        }
+        // default (turns): use 'in'
+        return '$instrText in $distStr';
+      }
+
+      final maybeSpoken = buildSpoken(instr, distanceToNext, language, bucket == 10);
       final update = NavigationUpdate(loc, instr, distanceToNext, remaining, nearest, maybeSpoken);
       _controller.add(update);
 
@@ -108,12 +158,10 @@ class NavigationService {
           _lastInstruction = instr;
           _lastDistanceBucket = bucket == -1 ? _lastDistanceBucket : bucket;
           await tts?.stop();
-          if (bucket == 10) {
-            // final proximity: speak brief instruction without meter count
-            await tts?.speak(instr);
-          } else {
-            await tts?.speak('$instr for ${distanceToNext.round()} meters');
-          }
+          final isFinal = bucket == 10;
+          // build spoken text according to language
+          final spokenToSpeak = buildSpoken(instr, distanceToNext, language, isFinal);
+          await tts?.speak(spokenToSpeak);
         }
       } catch (_) {}
     });
