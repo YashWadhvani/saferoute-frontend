@@ -9,7 +9,7 @@ class AuthService {
   Future<void> sendOtp(String identifier) async {
     try {
       final response = await _dio.post(
-        '$baseUrl/auth/send-otp',
+        '${baseUrl}auth/send-otp',
         data: {'identifier': identifier},
       );
   debugPrint('OTP sent: ${response.data}');
@@ -22,7 +22,7 @@ class AuthService {
   Future<String> verifyOtp(String identifier, String otp) async {
     try {
       final response = await _dio.post(
-        '$baseUrl/auth/verify-otp',
+        '${baseUrl}auth/verify-otp',
         data: {'identifier': identifier, 'otp': otp},
       );
   // Log full response for debugging

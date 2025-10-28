@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -15,6 +14,9 @@ import 'package:provider/provider.dart';
 import '../services/places_service.dart';
 import '../services/route_service.dart';
 import '../services/navigation_service.dart';
+import '../services/sos_service.dart';
+import 'rating_screen.dart';
+import 'debug_inspector_screen.dart';
 
 enum ActiveField { none, source, dest }
 
@@ -47,26 +49,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _loadCarIcon() async {
     try {
-      // load raw image bytes from assets
-      final data = await DefaultAssetBundle.of(context).load('assets/images/car.png');
+      // Prefer the high-level API which handles scaling for assets.
+      final double dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? View.of(context).devicePixelRatio;
+      final config = ImageConfiguration(devicePixelRatio: dpr, size: const Size(24, 24));
+      // `fromAssetImage` is deprecated; use the new `BitmapDescriptor.asset`
+      // shape which accepts an ImageConfiguration first and returns a Future.
+      try {
+        final assetIcon = await BitmapDescriptor.asset(config, 'assets/images/car.png');
+        if (!mounted) return;
+        setState(() => _carIcon = assetIcon);
+        return;
+      } catch (_) {
+        // fall through to bytes fallback
+      }
+    } catch (_) {
+      // fall back to manual bytes-based creation (older approach) if asset image fails
+    }
+
+    // Fallback: load bytes and create BitmapDescriptor from raw image data
+    try {
+      final assetBundle = DefaultAssetBundle.of(context);
+      const double desiredLogicalWidth = 24; // logical pixels for marker size
+      final double dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? View.of(context).devicePixelRatio;
+      final data = await assetBundle.load('assets/images/car.png');
       final bytes = data.buffer.asUint8List();
-  // Resize the image to a smaller logical width so marker appears smaller on the map.
-  // Choose [desiredLogicalWidth] in logical pixels (device-independent).
-  // The codec expects device pixels, so multiply by devicePixelRatio.
-  const double desiredLogicalWidth = 48; // change this to taste (logical pixels)
-  final double dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? ui.window.devicePixelRatio;
-  final int targetWidth = (desiredLogicalWidth * dpr).round();
-  final codec = await ui.instantiateImageCodec(bytes, targetWidth: targetWidth);
+      final int targetWidth = (desiredLogicalWidth * dpr).round();
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: targetWidth);
       final frame = await codec.getNextFrame();
       final ui.Image resized = frame.image;
       final byteData = await resized.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null) return;
       final resizedBytes = byteData.buffer.asUint8List();
-      final icon = BitmapDescriptor.fromBytes(resizedBytes);
+      final icon = BitmapDescriptor.bytes(resizedBytes);
       if (!mounted) return;
       setState(() => _carIcon = icon);
     } catch (_) {
-      // ignore
+      // ignore completely - map will use default marker
     }
   }
 
@@ -429,6 +447,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _navigating = false;
       _navInstruction = 'Press Start to begin navigation';
     });
+    // Automatically prompt rating (navigate to rating screen)
+    if (_selectedRouteIndex != null && _selectedRouteIndex! >= 0 && _selectedRouteIndex! < _routes.length) {
+      final routeId = _routes[_selectedRouteIndex!].id;
+      Future.microtask(() {
+        if (!mounted) return;
+        Navigator.of(context).push(MaterialPageRoute(builder: (_) => RatingScreen(routeId: routeId)));
+      });
+    }
   }
 
   // Persist minimal navigation state: selected route index and polyline points
@@ -461,6 +487,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           return LatLng(double.parse(parts[0]), double.parse(parts[1]));
         }).toList();
   // start navigation quietly (mute TTS for a short window)
+    if (!mounted) return;
     final settings = Provider.of<TtsSettings>(context, listen: false);
     _navigationService ??= NavigationService(tts: _tts);
     _navigationService!.start(routePoints, language: settings.language, rate: settings.rate, muteOnRestore: true);
@@ -494,6 +521,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
       }
     } catch (_) {}
+  }
+
+  Future<void> _sendSos() async {
+    try {
+      final pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
+      final service = SosService();
+      final ok = await service.sendSos(lat: pos.latitude, lng: pos.longitude, message: 'SOS from SafeRoute');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? 'SOS sent' : 'Failed to send SOS')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to get location or send SOS')));
+    }
   }
 
 
@@ -733,6 +773,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         try {
                           await _tts?.setLanguage(selectedLang);
                           await _tts?.setSpeechRate(selectedRate);
+                          // Also apply settings to navigation service if active so changes take effect immediately
+                          _navigationService?.applyTtsSettings(language: selectedLang, rate: selectedRate);
                         } catch (_) {}
                       },
                       child: const Text('Submit'),
@@ -1118,7 +1160,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               ),
                               if (_lastNavUpdate != null)
                                 Text(
-                                  'Next in ${formatDistance(_lastNavUpdate!.distanceToNext)} • ${formatDistance(_lastNavUpdate!.remainingDistance)} left',
+                                  'Next in ${formatDistanceLong(_lastNavUpdate!.distanceToNext)} • ${formatDistanceLong(_lastNavUpdate!.remainingDistance)} left',
                                   style: const TextStyle(fontSize: 12, color: Colors.black54),
                                 ),
                             ],
@@ -1304,20 +1346,55 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       )],
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-      floatingActionButton: _routePanelVisible
+      // Hide floating action buttons when route panel is visible OR when actively navigating.
+      floatingActionButton: (_routePanelVisible || _navigating)
           ? null
-          : FloatingActionButton.extended(
-              onPressed: () {
-                if (_navigating) {
-                  setState(() => _routePanelVisible = !_routePanelVisible);
-                } else {
-                  _fetchRoutesInPlace();
-                }
-              },
-              label: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 6.0),
-                child: Text('Route Options'),
-              ),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                FloatingActionButton(
+                  backgroundColor: Colors.redAccent,
+                  heroTag: 'sos',
+                  mini: true,
+                  onPressed: () async {
+                    // confirm
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Send SOS'),
+                        content: const Text('Send SOS to your trusted contacts with your current location?'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+                          ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Send')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) await _sendSos();
+                  },
+                  child: const Icon(Icons.warning),
+                ),
+                const SizedBox(height: 8),
+                // Debug inspector quick button (shows stored token and example payloads)
+                FloatingActionButton(
+                  heroTag: 'debug',
+                  mini: true,
+                  onPressed: () async {
+                    if (!mounted) return;
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DebugInspectorScreen()));
+                  },
+                  child: const Icon(Icons.bug_report),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.extended(
+                  heroTag: 'routes',
+                  onPressed: null,
+                  label: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 6.0),
+                    child: Text('Route Options'),
+                  ),
+                ),
+              ],
             ),
     );
   }

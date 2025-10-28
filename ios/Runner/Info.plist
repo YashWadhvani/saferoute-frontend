@@ -45,5 +45,13 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSContactsUsageDescription</key>
+	<string>SafeRoute needs access to your contacts to allow you to add trusted contacts for SOS.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SafeRoute needs your location to send SOS and provide navigation.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SafeRoute needs access to your photos to attach images when reporting incidents.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SafeRoute needs access to the camera to take photos when reporting incidents.</string>
 </dict>
 </plist>

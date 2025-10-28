@@ -8,9 +8,15 @@ class RouteService {
     try {
       final bodyText = jsonEncode(payload);
       debugPrint('RouteService -> final JSON payload: $bodyText');
+      // Defensive: ensure we always provide a leading slash on the path so
+      // Dio concatenation with BaseOptions.baseUrl cannot accidentally
+      // produce 'hostroutes/...' when baseUrl lacks a trailing slash.
+      final rawPath = '/api/routes/compare';
+      final path = rawPath.startsWith('/') ? rawPath : '/$rawPath';
+      try { debugPrint('RouteService: ApiClient.baseUrl=${ApiClient.dio.options.baseUrl}, path=$path'); } catch (_) {}
 
       final resp = await ApiClient.dio.post(
-        'routes/compare',
+        path,
         data: bodyText,
         options: Options(
           headers: {'Content-Type': 'application/json'}, // ensure header

@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import '../utils/map_helpers.dart';
@@ -30,6 +31,9 @@ class NavigationService {
   DateTime? _suppressUntil;
 
   NavigationService({this.tts});
+
+  // whether the TTS instance supports the requested language for speech
+  bool _ttsLanguageSupported = true;
 
   void start(List<LatLng> routePoints, {String? language, double? rate, bool muteOnRestore = false}) async {
     _posSub?.cancel();
@@ -80,7 +84,7 @@ class NavigationService {
         }
       }
       // Helpers: format distance for speech with unit conversion and pluralization
-      String _englishDistance(double meters) {
+      String englishDistance(double meters) {
         if (meters >= 1000) {
           final km = meters / 1000.0;
           final kmStr = km.toStringAsFixed(1);
@@ -91,7 +95,7 @@ class NavigationService {
         return m == 1 ? '$m meter' : '$m meters';
       }
 
-      String _hindiDistance(double meters) {
+      String hindiDistance(double meters) {
         if (meters >= 1000) {
           final km = meters / 1000.0;
           final kmStr = km.toStringAsFixed(1);
@@ -116,12 +120,12 @@ class NavigationService {
           }();
           if (isFinal) return 'अब $base'; // e.g. "अब बाएं मुड़ें"
           // For continue -> use "for" semantics in English; in Hindi keep "... में" which we attach in _hindiDistance
-          return '$base ${_hindiDistance(distanceMeters)}';
+          return '$base ${hindiDistance(distanceMeters)}';
         }
 
         // English phrasing: use "for" when continuing straight, "in" for turns
         if (isFinal) return 'Now $instrText';
-        final distStr = _englishDistance(distanceMeters);
+        final distStr = englishDistance(distanceMeters);
         if (isContinue) {
           return '$instrText for $distStr';
         }
@@ -136,13 +140,49 @@ class NavigationService {
       // TTS throttling: only speak when instruction changes OR when we pass
       // into a closer distance bucket (200m,100m,50m,20m,10m)
       try {
-        // Apply TTS settings if provided
-        if (language != null) {
-          try { await tts?.setLanguage(language); } catch (_) {}
-        }
-        if (rate != null) {
-          try { await tts?.setSpeechRate(rate); } catch (_) {}
-        }
+            // Apply TTS settings if provided (do this once at start)
+            try {
+                if (language != null) {
+                  // Check available languages on the device and use a close match if needed
+                  // Note: flutter_tts exposes available languages as a Future-getter in some versions
+                  final langsRaw = tts == null ? null : await tts!.getLanguages;
+                  // Debug: log raw languages returned by TTS engine
+                  try {
+                    debugPrint('NavigationService: available TTS languages raw: $langsRaw');
+                  } catch (_) {}
+                  final langs = (langsRaw ?? <dynamic>[]).map((e) => e.toString()).toList();
+                  String? chosen;
+                  if (langs.isNotEmpty) {
+                    if (langs.contains(language)) {
+                      chosen = language;
+                    }
+                    if (chosen == null) {
+                      chosen = langs.firstWhere(
+                        (l) => l.toLowerCase().startsWith(language.split('-').first.toLowerCase()),
+                        orElse: () => '',
+                      );
+                      if (chosen != null && chosen.isEmpty) chosen = null;
+                    }
+                  }
+                  // Debug: show chosen language or that none was matched
+                  try {
+                    debugPrint('NavigationService: requested language=$language, chosen=$chosen, langs=$langs');
+                  } catch (_) {}
+                  if (chosen != null) {
+                    await tts?.setLanguage(chosen);
+                    _ttsLanguageSupported = true;
+                  } else {
+                    // language not available on device; skip TTS and fallback silently
+                    _ttsLanguageSupported = false;
+                  }
+                }
+              if (rate != null) {
+                try { await tts?.setSpeechRate(rate); } catch (_) {}
+              }
+            } catch (_) {
+              // If TTS initialization fails, avoid speaking but continue emitting updates
+              _ttsLanguageSupported = false;
+            }
         // speak at fixed distance thresholds: 500m, 200m, and final 10m (brief)
         final buckets = [500, 200, 10];
         int bucket = -1;
@@ -151,10 +191,10 @@ class NavigationService {
             bucket = buckets[i];
           }
         }
-        final shouldSpeak = (_lastInstruction != instr) || (_lastDistanceBucket == null && bucket != -1) || (bucket != -1 && _lastDistanceBucket != bucket && (_lastDistanceBucket == null || bucket < _lastDistanceBucket!));
+  final shouldSpeak = (_lastInstruction != instr) || (_lastDistanceBucket == null && bucket != -1) || (bucket != -1 && _lastDistanceBucket != bucket && (_lastDistanceBucket == null || bucket < _lastDistanceBucket!));
         // Do not speak if we're within a suppression window (used for auto-restore)
         final suppressed = _suppressUntil != null && DateTime.now().isBefore(_suppressUntil!);
-        if (shouldSpeak && !suppressed) {
+        if (shouldSpeak && !suppressed && _ttsLanguageSupported) {
           _lastInstruction = instr;
           _lastDistanceBucket = bucket == -1 ? _lastDistanceBucket : bucket;
           await tts?.stop();
@@ -170,6 +210,50 @@ class NavigationService {
   void stop() {
     _posSub?.cancel();
     _posSub = null;
+  }
+
+  /// Apply TTS settings (language and rate) to the held FlutterTts instance
+  /// at runtime. This can be called while navigation is active to change voice.
+  Future<void> applyTtsSettings({String? language, double? rate}) async {
+    if (tts == null) return;
+    try {
+      if (language != null) {
+        final langsRaw = await tts!.getLanguages;
+        try {
+          debugPrint('NavigationService.applyTtsSettings: available languages raw: $langsRaw');
+        } catch (_) {}
+        final langs = (langsRaw ?? <dynamic>[]).map((e) => e.toString()).toList();
+        String? chosen;
+        if (langs.isNotEmpty) {
+          if (langs.contains(language)) {
+            chosen = language;
+          }
+          if (chosen == null) {
+            chosen = langs.firstWhere(
+              (l) => l.toLowerCase().startsWith(language.split('-').first.toLowerCase()),
+              orElse: () => '',
+            );
+            if (chosen != null && chosen.isEmpty) chosen = null;
+          }
+        }
+        try {
+          debugPrint('NavigationService.applyTtsSettings: requested=$language, chosen=$chosen, langs=$langs');
+        } catch (_) {}
+        if (chosen != null) {
+          await tts?.setLanguage(chosen);
+          _ttsLanguageSupported = true;
+        } else {
+          _ttsLanguageSupported = false;
+        }
+      }
+      if (rate != null) {
+        try {
+          await tts?.setSpeechRate(rate);
+        } catch (_) {}
+      }
+    } catch (_) {
+      _ttsLanguageSupported = false;
+    }
   }
 
   void dispose() {

@@ -12,7 +12,7 @@ import 'screens/profile_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/map_detail_screen.dart';
-import 'screens/contacts_screen.dart';
+import 'screens/trusted_contacts_screen.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
@@ -49,7 +49,7 @@ class SafeRouteApp extends StatelessWidget {
         '/settings': (context) => const SettingsScreen(),
         '/onboarding': (context) => const OnboardingScreen(),
         '/map_detail': (context) => const MapDetailScreen(),
-        '/contacts': (context) => const ContactsScreen(),
+  '/contacts': (context) => const TrustedContactsScreen(),
         '/login': (context) => const LoginScreen(),
       },
     );

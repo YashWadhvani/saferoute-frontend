@@ -107,3 +107,13 @@ String formatDistance(double meters) {
   }
   return '${meters.round()} m';
 }
+
+String formatDistanceLong(double meters) {
+  if (meters >= 1000) {
+    final km = meters / 1000.0;
+    final kmStr = km.toStringAsFixed(1);
+    return '$kmStr kilometers';
+  }
+  final m = meters.round();
+  return m == 1 ? '$m meter' : '$m meters';
+}
