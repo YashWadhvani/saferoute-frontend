@@ -807,18 +807,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onTap: () => Navigator.pushNamed(context, '/profile'),
             ),
             ListTile(
-              title: const Text('Settings'),
-              onTap: () => Navigator.pushNamed(context, '/settings'),
-            ),
-            ListTile(
-              title: const Text('Onboarding'),
-              onTap: () => Navigator.pushNamed(context, '/onboarding'),
-            ),
-            ListTile(
-              title: const Text('Map Detail'),
-              onTap: () => Navigator.pushNamed(context, '/map_detail'),
-            ),
-            ListTile(
               title: const Text('Contacts'),
               onTap: () => Navigator.pushNamed(context, '/contacts'),
             ),
@@ -1308,6 +1296,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                           Text('Distance: ${r.distanceText}'),
                                         if (r.durationText.isNotEmpty)
                                           Text('Duration: ${r.durationText}'),
+                                        if (r.tags.isNotEmpty)
+                                          Text('Tags: ${r.tags.join(', ')}'),
                                       ],
                                     ),
                                     onTap: () => _onSelectRoute(index),

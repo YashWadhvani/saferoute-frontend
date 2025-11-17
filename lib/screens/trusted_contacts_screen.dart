@@ -86,8 +86,10 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
       if (confirm != true) return;
       final updated = await _service.deleteTrustedContact(contact.id!);
       if (updated != null) {
-        if (mounted) setState(() => _contacts
+        if (mounted) {
+          setState(() => _contacts
             .clear());
+        }
         if (mounted) setState(() => _contacts.addAll(updated));
       } else {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to remove contact')));
@@ -109,10 +111,12 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
       if (match.id != null && match.id!.isNotEmpty) {
         final updated = await _service.deleteTrustedContact(match.id!);
         if (updated != null) {
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             _contacts.clear();
             _contacts.addAll(updated);
           });
+          }
           return;
         } else {
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to remove contact on server')));
@@ -243,7 +247,41 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
   Future<void> _pickFromPhoneContacts() async {
     // Try to open native contact picker (external). If not available, fall back
     // to in-app picker using getContacts.
+    // Capture context to avoid using BuildContext across async gaps.
+    final localContext = context;
     try {
+      // Ensure we have contacts permission before invoking the external picker.
+      try {
+        await FlutterContacts.requestPermission();
+      } catch (_) {
+        await Permission.contacts.request();
+      }
+
+      final status = await Permission.contacts.status;
+      if (!status.isGranted) {
+        if (status.isPermanentlyDenied) {
+          final open = await showDialog<bool>(
+            context: localContext,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Contacts permission required'),
+              content: const Text('Please grant contacts access in app settings to pick a contact.'),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+                ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Open Settings')),
+              ],
+            ),
+          );
+          if (open == true) await openAppSettings();
+        } else {
+          if (mounted) ScaffoldMessenger.of(localContext).showSnackBar(const SnackBar(content: Text('Contacts permission denied')));
+        }
+        return;
+      }
+
+      // At this point permission is granted; proceed to open the picker.
+
+      
+      
       Contact? picked;
       try {
         // flutter_contacts provides a platform picker in some versions
@@ -253,12 +291,12 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
         final devContacts = await FlutterContacts.getContacts(withProperties: true);
         final phoneContacts = devContacts.where((c) => c.phones.isNotEmpty).toList();
         if (phoneContacts.isEmpty) {
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No contacts with phone numbers found')));
+          if (mounted) ScaffoldMessenger.of(localContext).showSnackBar(const SnackBar(content: Text('No contacts with phone numbers found')));
           return;
         }
         if (!mounted) return;
         picked = await showModalBottomSheet<Contact>(
-          context: context,
+          context: localContext,
           builder: (ctx) {
             return Column(
               children: [
@@ -296,12 +334,12 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
       final ensured = await _ensureCountryCode(c.phone);
       if (ensured == null) return;
       if (_stagedContacts.any((e) => e.phone == ensured)) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Contact already staged')));
+        if (mounted) ScaffoldMessenger.of(localContext).showSnackBar(const SnackBar(content: Text('Contact already staged')));
         return;
       }
       if (mounted) setState(() => _stagedContacts.add(ContactModel(name: c.name, phone: ensured)));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to pick contact')));
+      if (mounted) ScaffoldMessenger.of(localContext).showSnackBar(const SnackBar(content: Text('Unable to pick contact')));
     }
   }
 
@@ -314,11 +352,13 @@ class _TrustedContactsScreenState extends State<TrustedContactsScreen> {
         final updated = await _service.addTrustedContact(c);
         if (updated != null) {
           // Server returned updated list: resync local contacts and remove staged items that are now present
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             _contacts.clear();
             _contacts.addAll(updated);
             _stagedContacts.removeWhere((s) => _contacts.any((mc) => mc.phone == s.phone));
           });
+          }
         } else {
           failed.add(c);
         }

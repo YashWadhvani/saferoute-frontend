@@ -49,7 +49,7 @@ class SafeRouteApp extends StatelessWidget {
         '/settings': (context) => const SettingsScreen(),
         '/onboarding': (context) => const OnboardingScreen(),
         '/map_detail': (context) => const MapDetailScreen(),
-  '/contacts': (context) => const TrustedContactsScreen(),
+        '/contacts': (context) => const TrustedContactsScreen(),
         '/login': (context) => const LoginScreen(),
       },
     );
